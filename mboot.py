@@ -4,6 +4,8 @@
 # Copyright (c) 2014, Intel Corporation.
 # Author: Falempe Jocelyn <jocelyn.falempe@intel.com>
 #
+# Modifications: osm0sis @ xda-developers
+#
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
 # version 2, as published by the Free Software Foundation.
@@ -21,7 +23,7 @@ import re
 import shutil
 
 # call an external command
-# optional parameter edir is the directory where it should be executed.
+# optional parameter edir is the directory where it should be executed
 def call(cmd, edir=''):
     if options.verbose:
         print '[', edir, '] Calling', cmd
@@ -60,6 +62,16 @@ def read_file(fname, odir=True):
     f.close()
     return data
 
+def read(fname, odir=True):
+    if odir and options.dir:
+        fname = os.path.join(options.dir, fname)
+    try:
+        f = open(fname, 'r')
+        f.close()
+        return fname
+    except IOError:
+        pass
+
 # unpack the ramdisk to outdir
 # caution, outdir is removed with rmtree() before unpacking
 def unpack_ramdisk(fname, outdir):
@@ -74,28 +86,50 @@ def unpack_ramdisk(fname, outdir):
     os.mkdir(outdir)
     call('cpio -i < ../' + fname, edir=outdir)
 
-# Return next few bytes from file f
+# return next few bytes from file f
 def check_byte(f, size):
-    off = f.tell()
+    origsize = size
+    # try skipping first byte if \x00 to hopefully avoid false positives with isalnum()
+    if size > 1:
+        skip = f.read(1)
+        if b'\x00' in skip:
+            size = size - 1
+        else:
+            f.seek(-1, os.SEEK_CUR)
     byte = f.read(size)
-    f.seek(-size, os.SEEK_CUR)
+    f.seek(-origsize, os.SEEK_CUR)
     return byte
 
 # Intel legacy format
 def unpack_bootimg_intel(fname):
     f = open(fname, 'r')
 
-    sig = f.read(512)
+    hdr = None
+# header may rarely not exist on some products
+    if not check_byte(f, 4).isalnum():
+        hdr = f.read(512)
+    hdrsize = f.tell()
+    print 'header size  ', hdrsize
 
-# it may have 480 bytes more of signature on some products
-    if not check_byte(f, 1).isalnum():
-        sig += f.read(480)
+    sig = None
+# header may have 480, 728 or 1024 bytes of signature appended on some products
+    if not check_byte(f, 4).isalnum():
+        sig = f.read(480)
+        if not check_byte(f, 4).isalnum():
+            sig += f.read(248)
+            if not check_byte(f, 4).isalnum():
+                sig += f.read(296)
+    sigsize = f.tell() - hdrsize
+    print 'sig size     ', sigsize
 
     cmdline_block = f.read(4096)
+
     bootstub = f.read(4096)
 # bootstub is 4k, but can be 8k on some products
-    if check_byte(f, 1).isalnum():
+    if check_byte(f, 2).isalnum():
         bootstub += f.read(4096)
+    stubsize = f.tell() - hdrsize - sigsize - 4096
+    print 'bootstub size', stubsize
 
     kernelsize, ramdisksize = struct.unpack('II', cmdline_block[1024:1032])
 
@@ -117,7 +151,10 @@ def unpack_bootimg_intel(fname):
     cmdline = cmdline.rstrip('\x00')
     parameters = cmdline_block[1032:1040]
 
-    write_file('sig', sig)
+    if hdr:
+        write_file('hdr', hdr)
+    if sig:
+        write_file('sig', sig)
     write_file('cmdline.txt', cmdline)
     write_file('parameter', parameters)
     write_file('bootstub', bootstub)
@@ -131,39 +168,6 @@ def skip_pad(f, pgsz):
     npg = ((f.tell() / pgsz) + 1)
     f.seek(npg * pgsz)
 
-# Google mkbootimg standard format
-def unpack_bootimg_google(fname):
-    f = open(fname, 'r')
-
-    header = f.read(64)
-    kernelsize = struct.unpack('I',header[8:12])[0]
-    ramdisksize = struct.unpack('I',header[16:20])[0]
-    pagesize = struct.unpack('I',header[36:40])[0]
-    sigsize = struct.unpack('I',header[40:44])[0]
-
-    print 'kernel size  ', kernelsize
-    print 'ramdisk size ', ramdisksize
-    print 'page size    ', pagesize
-    print 'sig size     ', sigsize
-
-    cmdline = f.read(512)
-    checksum = f.read(32)
-    cmdline += f.read(1024)
-    skip_pad(f, pagesize)
-    kernel = f.read(kernelsize)
-    skip_pad(f, pagesize)
-    ramdisk = f.read(ramdisksize)
-    skip_pad(f, pagesize)
-
-    cmdline = cmdline.rstrip('\x00')
-
-    write_file('cmdline.txt', cmdline)
-    write_file('kernel', kernel)
-    write_file('ramdisk.cpio.gz', ramdisk)
-
-    f.close()
-    unpack_ramdisk('ramdisk.cpio.gz', os.path.join(options.dir, 'extracted_ramdisk'))
-
 def unpack_bootimg(fname):
     if options.dir == 'tmp_boot_unpack' and os.path.exists(options.dir):
         print 'Removing ', options.dir
@@ -174,13 +178,7 @@ def unpack_bootimg(fname):
         if not os.path.exists(options.dir):
             os.mkdir(options.dir)
 
-    f = open(fname, 'r')
-    magic = f.read(8)
-    f.close()
-    if magic == 'ANDROID!':
-        unpack_bootimg_google(fname)
-    else:
-        unpack_bootimg_intel(fname)
+    unpack_bootimg_intel(fname)
 
 def pack_ramdisk(dname):
     dname = os.path.join(options.dir, dname)
@@ -199,7 +197,14 @@ def pack_bootimg_intel(fname):
     cmdline_block += read_file('parameter')
     cmdline_block += '\0' * (4096 - len(cmdline_block))
 
-    sig = read_file('sig')
+    # add header if present
+    hdr = None
+    if read('hdr'):
+        hdr = read_file('hdr')
+
+    # add signature back to header if present
+    if read('sig'):
+        hdr += read_file('sig')
 
     data = cmdline_block
     data += read_file('bootstub')
@@ -209,11 +214,11 @@ def pack_bootimg_intel(fname):
     topad = 512 - (len(data) % 512)
     data += '\xFF' * topad
 
-    #update signature
-    n_block = (len(data) / 512)
-    new_sig = sig[0:48] + struct.pack('I', n_block) + sig[52:]
-
-    data = new_sig + data
+    # update header
+    if hdr:
+        n_block = (len(data) / 512)
+        new_hdr = hdr[0:48] + struct.pack('I', n_block) + hdr[52:]
+        data = new_hdr + data
 
     write_file(fname, data, odir=False)
 
