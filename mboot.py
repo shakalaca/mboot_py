@@ -211,14 +211,14 @@ def pack_bootimg_intel(fname):
     data += kernel
     data += ramdisk
 
-    topad = 512 - (len(data) % 512)
-    data += '\xFF' * topad
-
     # update header
     if hdr:
-        n_block = (len(data) / 512)
+        n_block = ((len(data) + len(hdr)) / 512)
         new_hdr = hdr[0:48] + struct.pack('I', n_block) + hdr[52:]
         data = new_hdr + data
+
+    topad = 512 - (len(data) % 512)
+    data += '\xFF' * topad
 
     write_file(fname, data, odir=False)
 
