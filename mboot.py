@@ -205,6 +205,9 @@ def pack_bootimg_intel(fname):
     # add signature back to header if present
     if read('sig'):
         hdr += read_file('sig')
+    else:
+        imgType, = struct.unpack('I', hdr[52:56])
+        hdr = hdr[0:52] + struct.pack('I', imgType + 1) + hdr[56:]
 
     data = cmdline_block
     data += read_file('bootstub')
