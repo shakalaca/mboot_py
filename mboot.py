@@ -72,6 +72,14 @@ def read(fname, odir=True):
     except IOError:
         pass
 
+def generate_checksum(hdr):
+    checksum = 0
+    hdr_calc = hdr[0:7] + struct.pack('B', 0) + hdr[8:56]
+    for bit in hdr_calc:
+        checksum ^= ord(bit)
+
+    return checksum
+
 # unpack the ramdisk to outdir
 # caution, outdir is removed with rmtree() before unpacking
 def unpack_ramdisk(fname, outdir):
@@ -217,7 +225,9 @@ def pack_bootimg_intel(fname):
     # update header
     if hdr:
         n_block = ((len(data) + len(hdr)) / 512)
-        new_hdr = hdr[0:48] + struct.pack('I', n_block) + hdr[52:]
+        hdr = hdr[0:48] + struct.pack('I', n_block) + hdr[52:]
+        checksum = generate_checksum(hdr)
+        new_hdr = hdr[0:7] + struct.pack('B', checksum) + hdr[8:]
         data = new_hdr + data
 
     topad = 512 - (len(data) % 512)
